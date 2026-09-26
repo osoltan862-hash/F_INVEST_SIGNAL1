@@ -1,24 +1,48 @@
 import os
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
-
-import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 from urllib.error import HTTPError, URLError
-import json
+
+import pandas as pd
+
+from fastapi import FastAPI, HTTPException, Query, Request as FastAPIRequest
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 
 # =========================================================
-# Support Rebound Scanner V1.1
-# Binance Public Market Data API
+# Support Rebound Scanner V1.2
+# =========================================================
+#
+# Strategy:
+#
+# Drop
+#   ↓
+# Support / Low Area
+#   ↓
+# Early Bullish Rejection
+#   ↓
+# Volume Confirmation
+#   ↓
+# WMA 50 Turning Up
+#
+# Binance Spot
+# Timeframe: 5m
+#
+# V1.2 adds diagnostic endpoints and detailed logging.
 # =========================================================
 
-APP_VERSION = "V1.1"
+
+APP_VERSION = "V1.2"
+
+
+# =========================================================
+# Logging
+# =========================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,46 +53,120 @@ logger = logging.getLogger("support_rebound_scanner")
 
 
 # =========================================================
-# Binance Market Data API
+# Binance Public Market Data API
 # =========================================================
 
 BINANCE_DATA_API = os.getenv(
     "BINANCE_DATA_API",
     "https://data-api.binance.vision"
-)
+).rstrip("/")
 
 
 # =========================================================
 # Strategy Settings
 # =========================================================
 
-TIMEFRAME = os.getenv("TIMEFRAME", "5m")
+TIMEFRAME = os.getenv(
+    "TIMEFRAME",
+    "5m"
+)
 
-CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "150"))
+CANDLE_LIMIT = int(
+    os.getenv(
+        "CANDLE_LIMIT",
+        "150"
+    )
+)
 
-DROP_LOOKBACK = int(os.getenv("DROP_LOOKBACK", "24"))
-MIN_DROP_PERCENT = float(os.getenv("MIN_DROP_PERCENT", "3.0"))
+DROP_LOOKBACK = int(
+    os.getenv(
+        "DROP_LOOKBACK",
+        "24"
+    )
+)
 
-SUPPORT_LOOKBACK = int(os.getenv("SUPPORT_LOOKBACK", "12"))
+MIN_DROP_PERCENT = float(
+    os.getenv(
+        "MIN_DROP_PERCENT",
+        "3.0"
+    )
+)
+
+SUPPORT_LOOKBACK = int(
+    os.getenv(
+        "SUPPORT_LOOKBACK",
+        "12"
+    )
+)
+
 SUPPORT_TOLERANCE_PERCENT = float(
-    os.getenv("SUPPORT_TOLERANCE_PERCENT", "0.20")
+    os.getenv(
+        "SUPPORT_TOLERANCE_PERCENT",
+        "0.20"
+    )
 )
 
-VOLUME_LOOKBACK = int(os.getenv("VOLUME_LOOKBACK", "11"))
+VOLUME_LOOKBACK = int(
+    os.getenv(
+        "VOLUME_LOOKBACK",
+        "11"
+    )
+)
+
 VOLUME_MULTIPLIER = float(
-    os.getenv("VOLUME_MULTIPLIER", "1.30")
+    os.getenv(
+        "VOLUME_MULTIPLIER",
+        "1.30"
+    )
 )
 
-WMA_FAST = int(os.getenv("WMA_FAST", "50"))
-WMA_SLOW = int(os.getenv("WMA_SLOW", "103"))
+WMA_FAST = int(
+    os.getenv(
+        "WMA_FAST",
+        "50"
+    )
+)
 
-SL_PERCENT = float(os.getenv("SL_PERCENT", "3.0"))
-TP1_PERCENT = float(os.getenv("TP1_PERCENT", "1.0"))
-TP2_PERCENT = float(os.getenv("TP2_PERCENT", "2.0"))
-TP3_PERCENT = float(os.getenv("TP3_PERCENT", "3.0"))
+WMA_SLOW = int(
+    os.getenv(
+        "WMA_SLOW",
+        "103"
+    )
+)
 
 MIN_BODY_RATIO = float(
-    os.getenv("MIN_BODY_RATIO", "0.25")
+    os.getenv(
+        "MIN_BODY_RATIO",
+        "0.25"
+    )
+)
+
+SL_PERCENT = float(
+    os.getenv(
+        "SL_PERCENT",
+        "3.0"
+    )
+)
+
+TP1_PERCENT = float(
+    os.getenv(
+        "TP1_PERCENT",
+        "1.0"
+    )
+)
+
+TP2_PERCENT = float(
+    os.getenv(
+        "TP2_PERCENT",
+        "2.0"
+    )
+)
+
+TP3_PERCENT = float(
+    os.getenv(
+        "TP3_PERCENT",
+        "3.0"
+    )
 )
 
 
@@ -83,72 +181,198 @@ app = FastAPI(
 
 
 # =========================================================
-# Static Files
+# Static Directory
 # =========================================================
 
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
 STATIC_DIR = os.path.join(
-    os.path.dirname(__file__),
+    BASE_DIR,
     "static"
 )
 
+
 if os.path.isdir(STATIC_DIR):
+
     app.mount(
         "/static",
-        StaticFiles(directory=STATIC_DIR),
+        StaticFiles(
+            directory=STATIC_DIR
+        ),
         name="static"
+    )
+
+    logger.info(
+        "Static directory found: %s",
+        STATIC_DIR
+    )
+
+else:
+
+    logger.error(
+        "Static directory NOT FOUND: %s",
+        STATIC_DIR
     )
 
 
 # =========================================================
-# Binance HTTP Helper
+# Request Logging Middleware
 # =========================================================
 
-def binance_get(path: str, params: Optional[dict] = None):
+@app.middleware("http")
+async def request_logger(
+    request: FastAPIRequest,
+    call_next
+):
 
-    url = BINANCE_DATA_API.rstrip("/") + path
+    start_time = datetime.now(
+        timezone.utc
+    )
+
+    logger.info(
+        "REQUEST START | %s %s",
+        request.method,
+        request.url.path
+    )
+
+    try:
+
+        response = await call_next(
+            request
+        )
+
+        elapsed = (
+            datetime.now(
+                timezone.utc
+            ) - start_time
+        ).total_seconds()
+
+        logger.info(
+            "REQUEST END | %s %s | status=%s | %.3fs",
+            request.method,
+            request.url.path,
+            response.status_code,
+            elapsed
+        )
+
+        return response
+
+    except Exception as e:
+
+        logger.exception(
+            "REQUEST ERROR | %s %s | %s",
+            request.method,
+            request.url.path,
+            e
+        )
+
+        raise
+
+
+# =========================================================
+# Binance GET Helper
+# =========================================================
+
+def binance_get(
+    path: str,
+    params: Optional[dict] = None
+):
+
+    url = (
+        BINANCE_DATA_API
+        + path
+    )
 
     if params:
-        url += "?" + urlencode(params)
 
-    logger.info("Binance request: %s", url)
+        url += "?" + urlencode(
+            params
+        )
+
+    logger.info(
+        "BINANCE REQUEST | %s",
+        url
+    )
 
     request = Request(
-        url,
+        url=url,
         headers={
-            "User-Agent": "Support-Rebound-Scanner/1.1"
+            "User-Agent":
+                "Support-Rebound-Scanner/1.2"
         },
         method="GET"
     )
 
     try:
 
-        with urlopen(request, timeout=20) as response:
+        with urlopen(
+            request,
+            timeout=20
+        ) as response:
 
-            raw = response.read().decode("utf-8")
+            status_code = (
+                response.status
+            )
 
-            return json.loads(raw)
+            body = (
+                response
+                .read()
+                .decode("utf-8")
+            )
+
+            logger.info(
+                "BINANCE RESPONSE | HTTP %s",
+                status_code
+            )
+
+            try:
+
+                data = json.loads(
+                    body
+                )
+
+            except json.JSONDecodeError:
+
+                logger.error(
+                    "BINANCE INVALID JSON | %s",
+                    body[:500]
+                )
+
+                raise RuntimeError(
+                    "Binance returned invalid JSON."
+                )
+
+            return data
 
     except HTTPError as e:
 
         try:
-            body = e.read().decode("utf-8")
+
+            body = (
+                e.read()
+                .decode("utf-8")
+            )
+
         except Exception:
+
             body = ""
 
         logger.error(
-            "Binance HTTP %s: %s",
+            "BINANCE HTTP ERROR | code=%s | body=%s",
             e.code,
-            body
+            body[:1000]
         )
 
         raise RuntimeError(
-            f"Binance API HTTP {e.code}: {body}"
+            f"Binance HTTP {e.code}: {body}"
         )
 
     except URLError as e:
 
         logger.error(
-            "Binance connection error: %s",
+            "BINANCE URL ERROR | %s",
             e
         )
 
@@ -156,10 +380,20 @@ def binance_get(path: str, params: Optional[dict] = None):
             f"Binance connection error: {e}"
         )
 
+    except TimeoutError:
+
+        logger.error(
+            "BINANCE TIMEOUT"
+        )
+
+        raise RuntimeError(
+            "Binance request timed out after 20 seconds."
+        )
+
     except Exception as e:
 
         logger.exception(
-            "Unexpected Binance error"
+            "BINANCE UNKNOWN ERROR"
         )
 
         raise RuntimeError(
@@ -168,66 +402,128 @@ def binance_get(path: str, params: Optional[dict] = None):
 
 
 # =========================================================
-# Symbol Helpers
+# Symbol Normalization
 # =========================================================
 
-def normalize_symbol(symbol: str) -> str:
+def normalize_symbol(
+    symbol: str
+) -> str:
 
     if not symbol:
+
         return ""
 
-    symbol = symbol.strip().upper()
+    symbol = (
+        symbol
+        .strip()
+        .upper()
+    )
 
-    symbol = symbol.replace("-", "/")
+    symbol = symbol.replace(
+        "-",
+        "/"
+    )
 
-    if "/" not in symbol and symbol.endswith("USDT"):
-        symbol = symbol[:-4] + "/USDT"
+    if (
+        "/" not in symbol
+        and symbol.endswith("USDT")
+    ):
 
-    if "/" not in symbol:
-        return symbol
+        symbol = (
+            symbol[:-4]
+            + "/USDT"
+        )
 
-    base, quote = symbol.split("/", 1)
-
-    return f"{base}/{quote}"
+    return symbol
 
 
-def binance_symbol(symbol: str) -> str:
+def binance_symbol(
+    symbol: str
+) -> str:
 
-    normalized = normalize_symbol(symbol)
+    normalized = normalize_symbol(
+        symbol
+    )
 
-    return normalized.replace("/", "")
+    return normalized.replace(
+        "/",
+        ""
+    )
 
 
 # =========================================================
-# Binance Spot Symbols
+# Binance Spot USDT Symbols
 # =========================================================
 
 def get_spot_usdt_symbols():
+
+    logger.info(
+        "SYMBOLS | requesting exchangeInfo"
+    )
 
     data = binance_get(
         "/api/v3/exchangeInfo"
     )
 
+    if not isinstance(
+        data,
+        dict
+    ):
+
+        raise RuntimeError(
+            "Invalid exchangeInfo response."
+        )
+
+    raw_symbols = data.get(
+        "symbols",
+        []
+    )
+
+    if not raw_symbols:
+
+        raise RuntimeError(
+            "Binance exchangeInfo returned zero symbols."
+        )
+
     symbols = []
 
-    for item in data.get("symbols", []):
+    for item in raw_symbols:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+            continue
 
         if (
-            item.get("status") == "TRADING"
-            and item.get("quoteAsset") == "USDT"
-            and item.get("isSpotTradingAllowed") is True
+            item.get("status")
+            == "TRADING"
+
+            and item.get("quoteAsset")
+            == "USDT"
+
+            and item.get(
+                "isSpotTradingAllowed"
+            )
+            is True
         ):
 
-            symbols.append(
-                item.get("symbol")
+            symbol = item.get(
+                "symbol"
             )
+
+            if symbol:
+
+                symbols.append(
+                    symbol
+                )
 
     symbols = sorted(
         set(symbols)
     )
 
     logger.info(
-        "Loaded %s Binance Spot USDT symbols",
+        "SYMBOLS | loaded %s Spot USDT symbols",
         len(symbols)
     )
 
@@ -235,12 +531,23 @@ def get_spot_usdt_symbols():
 
 
 # =========================================================
-# Fetch Candles
+# Fetch OHLCV
 # =========================================================
 
-def fetch_ohlcv(symbol: str) -> pd.DataFrame:
+def fetch_ohlcv(
+    symbol: str
+) -> pd.DataFrame:
 
-    raw_symbol = binance_symbol(symbol)
+    raw_symbol = binance_symbol(
+        symbol
+    )
+
+    logger.info(
+        "KLINES | symbol=%s | interval=%s | limit=%s",
+        raw_symbol,
+        TIMEFRAME,
+        CANDLE_LIMIT
+    )
 
     data = binance_get(
         "/api/v3/klines",
@@ -251,11 +558,26 @@ def fetch_ohlcv(symbol: str) -> pd.DataFrame:
         }
     )
 
-    if not data:
+    if not isinstance(
+        data,
+        list
+    ):
 
         raise RuntimeError(
-            f"No candle data returned for {raw_symbol}"
+            "Binance klines response is not a list."
         )
+
+    if len(data) == 0:
+
+        raise RuntimeError(
+            f"No candles returned for {raw_symbol}."
+        )
+
+    logger.info(
+        "KLINES | received %s candles for %s",
+        len(data),
+        raw_symbol
+    )
 
     columns = [
         "open_time",
@@ -311,17 +633,26 @@ def fetch_ohlcv(symbol: str) -> pd.DataFrame:
             "close",
             "volume"
         ]
-    ).reset_index(drop=True)
+    ).reset_index(
+        drop=True
+    )
 
-    # =====================================================
-    # Remove current still-forming candle
-    # =====================================================
+    # -----------------------------------------------------
+    # Remove current candle because it may still be forming
+    # -----------------------------------------------------
 
     if len(df) > 1:
 
         df = df.iloc[:-1].copy()
 
-    return df.reset_index(drop=True)
+    logger.info(
+        "KLINES | closed candles available=%s",
+        len(df)
+    )
+
+    return df.reset_index(
+        drop=True
+    )
 
 
 # =========================================================
@@ -334,16 +665,22 @@ def calculate_wma(
 ) -> pd.Series:
 
     weights = pd.Series(
-        range(1, period + 1),
+        range(
+            1,
+            period + 1
+        ),
         dtype=float
     )
 
     return series.rolling(
         period
     ).apply(
-        lambda values: (
-            values * weights.values
-        ).sum() / weights.sum(),
+        lambda values:
+            (
+                values
+                * weights.values
+            ).sum()
+            / weights.sum(),
         raw=True
     )
 
@@ -352,22 +689,28 @@ def calculate_wma(
 # Price Levels
 # =========================================================
 
-def calculate_levels(entry: float):
+def calculate_levels(
+    entry: float
+):
 
-    sl = entry * (
-        1.0 - SL_PERCENT / 100.0
+    sl = (
+        entry
+        * (1.0 - SL_PERCENT / 100.0)
     )
 
-    tp1 = entry * (
-        1.0 + TP1_PERCENT / 100.0
+    tp1 = (
+        entry
+        * (1.0 + TP1_PERCENT / 100.0)
     )
 
-    tp2 = entry * (
-        1.0 + TP2_PERCENT / 100.0
+    tp2 = (
+        entry
+        * (1.0 + TP2_PERCENT / 100.0)
     )
 
-    tp3 = entry * (
-        1.0 + TP3_PERCENT / 100.0
+    tp3 = (
+        entry
+        * (1.0 + TP3_PERCENT / 100.0)
     )
 
     return {
@@ -380,16 +723,20 @@ def calculate_levels(entry: float):
 
 
 # =========================================================
-# Candle Rejection
+# Rejection Candle
 # =========================================================
 
-def rejection_candle(row):
+def rejection_candle(
+    row
+):
 
     candle_range = float(
-        row["high"] - row["low"]
+        row["high"]
+        - row["low"]
     )
 
     if candle_range <= 0:
+
         return {
             "bullish": False,
             "body_ratio": 0.0,
@@ -398,11 +745,14 @@ def rejection_candle(row):
         }
 
     body = abs(
-        float(row["close"]) -
-        float(row["open"])
+        float(row["close"])
+        - float(row["open"])
     )
 
-    body_ratio = body / candle_range
+    body_ratio = (
+        body
+        / candle_range
+    )
 
     lower_wick = (
         min(
@@ -413,50 +763,65 @@ def rejection_candle(row):
     )
 
     lower_wick_ratio = (
-        lower_wick / candle_range
+        lower_wick
+        / candle_range
     )
 
     close_position = (
-        float(row["close"]) -
-        float(row["low"])
+        float(row["close"])
+        - float(row["low"])
     ) / candle_range
 
     return {
-        "bullish": (
-            float(row["close"]) >
-            float(row["open"])
-        ),
 
-        "body_ratio": float(
-            body_ratio
-        ),
+        "bullish":
+            float(row["close"])
+            > float(row["open"]),
 
-        "close_upper_half": (
-            close_position >= 0.50
-        ),
+        "body_ratio":
+            float(body_ratio),
 
-        "lower_wick_ratio": float(
-            lower_wick_ratio
-        )
+        "close_upper_half":
+            close_position >= 0.50,
+
+        "lower_wick_ratio":
+            float(lower_wick_ratio)
     }
 
 
 # =========================================================
-# Main Analysis
+# Main Strategy Analysis
 # =========================================================
 
-def analyze_symbol(symbol: str):
+def analyze_symbol(
+    symbol: str
+):
 
-    normalized = normalize_symbol(symbol)
+    normalized = normalize_symbol(
+        symbol
+    )
 
-    if not normalized.endswith("/USDT"):
+    logger.info(
+        "SCAN START | requested=%s | normalized=%s",
+        symbol,
+        normalized
+    )
+
+    if not normalized.endswith(
+        "/USDT"
+    ):
 
         raise HTTPException(
             status_code=400,
-            detail="Only Binance Spot USDT symbols are supported."
+            detail=(
+                "Only Binance Spot USDT "
+                "symbols are supported."
+            )
         )
 
-    df = fetch_ohlcv(normalized)
+    df = fetch_ohlcv(
+        normalized
+    )
 
     minimum_required = max(
         WMA_SLOW + 5,
@@ -466,15 +831,45 @@ def analyze_symbol(symbol: str):
         110
     )
 
+    logger.info(
+        "SCAN DATA | candles=%s | minimum=%s",
+        len(df),
+        minimum_required
+    )
+
     if len(df) < minimum_required:
 
+        logger.warning(
+            "SCAN STOP | not enough candles"
+        )
+
         return {
+
             "symbol": normalized,
-            "signal": "NOT ENOUGH DATA",
-            "message": (
-                f"Need at least {minimum_required} "
-                f"closed candles."
-            )
+
+            "signal":
+                "NOT ENOUGH DATA",
+
+            "message":
+                (
+                    f"Need at least "
+                    f"{minimum_required} "
+                    f"closed candles."
+                ),
+
+            "candles":
+                len(df),
+
+            "minimum_required":
+                minimum_required,
+
+            "timeframe":
+                TIMEFRAME,
+
+            "updated_at":
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
         }
 
     # =====================================================
@@ -511,32 +906,48 @@ def analyze_symbol(symbol: str):
     )
 
     # =====================================================
-    # Recent High / Drop
+    # Drop
     # =====================================================
 
     drop_start = max(
         0,
-        len(df) - DROP_LOOKBACK - 1
+        len(df)
+        - DROP_LOOKBACK
+        - 1
     )
 
-    drop_end = len(df) - 1
+    drop_end = (
+        len(df) - 1
+    )
 
     previous_window = df.iloc[
         drop_start:drop_end
     ]
 
     recent_high = float(
-        previous_window["high"].max()
+        previous_window[
+            "high"
+        ].max()
     )
 
-    drop_percent = (
-        (recent_high - entry)
-        / recent_high
-        * 100.0
-    )
+    if recent_high > 0:
+
+        drop_percent = (
+            (
+                recent_high
+                - entry
+            )
+            / recent_high
+            * 100.0
+        )
+
+    else:
+
+        drop_percent = 0.0
 
     drop_condition = (
-        drop_percent >= MIN_DROP_PERCENT
+        drop_percent
+        >= MIN_DROP_PERCENT
     )
 
     # =====================================================
@@ -548,14 +959,25 @@ def analyze_symbol(symbol: str):
     ]
 
     support = float(
-        support_window["low"].min()
+        support_window[
+            "low"
+        ].min()
     )
 
-    support_distance_percent = (
-        abs(entry - support)
-        / support
-        * 100.0
-    )
+    if support > 0:
+
+        support_distance_percent = (
+            abs(
+                entry
+                - support
+            )
+            / support
+            * 100.0
+        )
+
+    else:
+
+        support_distance_percent = 0.0
 
     # =====================================================
     # Support Touch
@@ -569,28 +991,43 @@ def analyze_symbol(symbol: str):
         previous["low"]
     )
 
-    current_support_distance = (
-        abs(current_low - support)
-        / support
-        * 100.0
-    )
+    if support > 0:
 
-    previous_support_distance = (
-        abs(previous_low - support)
-        / support
-        * 100.0
-    )
+        current_support_distance = (
+            abs(
+                current_low
+                - support
+            )
+            / support
+            * 100.0
+        )
+
+        previous_support_distance = (
+            abs(
+                previous_low
+                - support
+            )
+            / support
+            * 100.0
+        )
+
+    else:
+
+        current_support_distance = 999.0
+        previous_support_distance = 999.0
 
     support_touched = (
         current_support_distance
         <= SUPPORT_TOLERANCE_PERCENT
+
         or
+
         previous_support_distance
         <= SUPPORT_TOLERANCE_PERCENT
     )
 
     # =====================================================
-    # Rejection Candle
+    # Bullish Rejection
     # =====================================================
 
     candle = rejection_candle(
@@ -599,18 +1036,24 @@ def analyze_symbol(symbol: str):
 
     bullish_rejection = (
         candle["bullish"]
+
         and
+
         candle["body_ratio"]
         >= MIN_BODY_RATIO
+
         and
+
         candle["close_upper_half"]
+
         and
+
         candle["lower_wick_ratio"]
         >= 0.15
     )
 
     # =====================================================
-    # Volume Confirmation
+    # Volume
     # =====================================================
 
     volume_start = (
@@ -619,7 +1062,9 @@ def analyze_symbol(symbol: str):
         - 1
     )
 
-    volume_end = len(df) - 1
+    volume_end = (
+        len(df) - 1
+    )
 
     previous_volumes = df.iloc[
         volume_start:volume_end
@@ -645,7 +1090,8 @@ def analyze_symbol(symbol: str):
         volume_ratio = 0.0
 
     volume_condition = (
-        volume_ratio >= VOLUME_MULTIPLIER
+        volume_ratio
+        >= VOLUME_MULTIPLIER
     )
 
     # =====================================================
@@ -653,53 +1099,71 @@ def analyze_symbol(symbol: str):
     # =====================================================
 
     wma_turning_up = (
-        wma_fast >
-        previous_wma_fast
+        wma_fast
+        > previous_wma_fast
     )
 
     # =====================================================
-    # Final Signal
+    # Conditions
     # =====================================================
 
     conditions = {
 
-        "drop": bool(
-            drop_condition
-        ),
+        "drop":
+            bool(
+                drop_condition
+            ),
 
-        "support_touch": bool(
-            support_touched
-        ),
+        "support_touch":
+            bool(
+                support_touched
+            ),
 
-        "bullish_rejection": bool(
-            bullish_rejection
-        ),
+        "bullish_rejection":
+            bool(
+                bullish_rejection
+            ),
 
-        "volume_confirmation": bool(
-            volume_condition
-        ),
+        "volume_confirmation":
+            bool(
+                volume_condition
+            ),
 
-        "wma50_turning_up": bool(
-            wma_turning_up
-        )
+        "wma50_turning_up":
+            bool(
+                wma_turning_up
+            )
     }
 
     confirmed = all(
         conditions.values()
     )
 
+    # =====================================================
+    # Signal
+    # =====================================================
+
     if confirmed:
 
-        signal = "EARLY SUPPORT REBOUND"
+        signal = (
+            "EARLY SUPPORT REBOUND"
+        )
 
         message = (
-            "All support-rebound conditions "
-            "are confirmed."
+            "All support-rebound "
+            "conditions are confirmed."
+        )
+
+        logger.info(
+            "SIGNAL CONFIRMED | %s",
+            normalized
         )
 
     else:
 
-        signal = "NO CONFIRMED SIGNAL"
+        signal = (
+            "NO CONFIRMED SIGNAL"
+        )
 
         failed = [
             name
@@ -713,6 +1177,12 @@ def analyze_symbol(symbol: str):
             + ", ".join(failed)
         )
 
+        logger.info(
+            "NO SIGNAL | %s | failed=%s",
+            normalized,
+            failed
+        )
+
     # =====================================================
     # Levels
     # =====================================================
@@ -721,125 +1191,151 @@ def analyze_symbol(symbol: str):
         entry
     )
 
-    # =====================================================
-    # Result
-    # =====================================================
+    result = {
 
-    return {
+        "symbol":
+            normalized,
 
-        "symbol": normalized,
+        "signal":
+            signal,
 
-        "signal": signal,
+        "message":
+            message,
 
-        "message": message,
+        "timeframe":
+            TIMEFRAME,
 
-        "timeframe": TIMEFRAME,
+        "market":
+            "Binance Spot",
 
-        "market": "Binance Spot",
+        "price":
+            round(
+                entry,
+                12
+            ),
 
-        "price": round(
-            entry,
-            12
-        ),
+        "entry":
+            round(
+                entry,
+                12
+            ),
 
-        "entry": round(
-            levels["entry"],
-            12
-        ),
+        "drop_percent":
+            round(
+                drop_percent,
+                3
+            ),
 
-        "drop_percent": round(
-            drop_percent,
-            3
-        ),
+        "recent_high":
+            round(
+                recent_high,
+                12
+            ),
 
-        "recent_high": round(
-            recent_high,
-            12
-        ),
+        "support":
+            round(
+                support,
+                12
+            ),
 
-        "support": round(
-            support,
-            12
-        ),
+        "support_distance_percent":
+            round(
+                support_distance_percent,
+                3
+            ),
 
-        "support_distance_percent": round(
-            support_distance_percent,
-            3
-        ),
+        "volume_ratio":
+            round(
+                volume_ratio,
+                3
+            ),
 
-        "volume_ratio": round(
-            volume_ratio,
-            3
-        ),
+        "average_volume":
+            round(
+                average_volume,
+                8
+            ),
 
-        "average_volume": round(
-            average_volume,
-            8
-        ),
+        "current_volume":
+            round(
+                current_volume,
+                8
+            ),
 
-        "current_volume": round(
-            current_volume,
-            8
-        ),
+        "wma50":
+            round(
+                wma_fast,
+                12
+            ),
 
-        "wma50": round(
-            wma_fast,
-            12
-        ),
+        "wma103":
+            round(
+                wma_slow,
+                12
+            ),
 
-        "wma103": round(
-            wma_slow,
-            12
-        ),
+        "previous_wma50":
+            round(
+                previous_wma_fast,
+                12
+            ),
 
-        "previous_wma50": round(
-            previous_wma_fast,
-            12
-        ),
+        "candle_body_ratio":
+            round(
+                candle[
+                    "body_ratio"
+                ],
+                3
+            ),
 
-        "candle_body_ratio": round(
-            candle["body_ratio"],
-            3
-        ),
+        "lower_wick_ratio":
+            round(
+                candle[
+                    "lower_wick_ratio"
+                ],
+                3
+            ),
 
-        "lower_wick_ratio": round(
-            candle["lower_wick_ratio"],
-            3
-        ),
-
-        "conditions": conditions,
+        "conditions":
+            conditions,
 
         "levels": {
 
-            "entry": round(
-                levels["entry"],
-                12
-            ),
+            "entry":
+                round(
+                    levels["entry"],
+                    12
+                ),
 
-            "sl": round(
-                levels["sl"],
-                12
-            ),
+            "sl":
+                round(
+                    levels["sl"],
+                    12
+                ),
 
-            "tp1": round(
-                levels["tp1"],
-                12
-            ),
+            "tp1":
+                round(
+                    levels["tp1"],
+                    12
+                ),
 
-            "tp2": round(
-                levels["tp2"],
-                12
-            ),
+            "tp2":
+                round(
+                    levels["tp2"],
+                    12
+                ),
 
-            "tp3": round(
-                levels["tp3"],
-                12
-            )
+            "tp3":
+                round(
+                    levels["tp3"],
+                    12
+                )
         },
 
         "strategy": {
 
-            "drop_lookback": DROP_LOOKBACK,
+            "drop_lookback":
+                DROP_LOOKBACK,
 
             "min_drop_percent":
                 MIN_DROP_PERCENT,
@@ -875,30 +1371,53 @@ def analyze_symbol(symbol: str):
                 TP3_PERCENT
         },
 
+        "candles":
+            len(df),
+
         "updated_at":
             datetime.now(
                 timezone.utc
             ).isoformat()
     }
 
+    logger.info(
+        "SCAN COMPLETE | %s | signal=%s",
+        normalized,
+        signal
+    )
+
+    return result
+
 
 # =========================================================
-# Routes
+# HOME
 # =========================================================
 
 @app.get("/")
 def home():
+
+    logger.info(
+        "HOME | serving index.html"
+    )
 
     index_file = os.path.join(
         STATIC_DIR,
         "index.html"
     )
 
-    if not os.path.isfile(index_file):
+    if not os.path.isfile(
+        index_file
+    ):
+
+        logger.error(
+            "HOME ERROR | index.html not found"
+        )
 
         raise HTTPException(
             status_code=404,
-            detail="static/index.html not found."
+            detail=(
+                "static/index.html not found."
+            )
         )
 
     return FileResponse(
@@ -906,14 +1425,24 @@ def home():
     )
 
 
+# =========================================================
+# HEALTH
+# =========================================================
+
 @app.get("/api/health")
 def health():
 
+    logger.info(
+        "HEALTH CHECK"
+    )
+
     return {
 
-        "status": "ok",
+        "status":
+            "ok",
 
-        "version": APP_VERSION,
+        "version":
+            APP_VERSION,
 
         "binance_api":
             BINANCE_DATA_API,
@@ -925,29 +1454,309 @@ def health():
             "Binance Spot",
 
         "strategy":
-            "Drop → Support → Rejection → Volume → WMA50 Up"
+            (
+                "Drop → Support → "
+                "Rejection → Volume → "
+                "WMA50 Up"
+            )
     }
 
 
-@app.get("/api/symbols")
-def symbols():
+# =========================================================
+# DIAGNOSTIC 1
+# Test Binance ExchangeInfo
+# =========================================================
+
+@app.get("/api/test-binance")
+def test_binance():
+
+    logger.info(
+        "DIAGNOSTIC | test-binance START"
+    )
 
     try:
 
-        data = get_spot_usdt_symbols()
+        data = binance_get(
+            "/api/v3/exchangeInfo"
+        )
+
+        if not isinstance(
+            data,
+            dict
+        ):
+
+            return {
+
+                "ok": False,
+
+                "test":
+                    "exchangeInfo",
+
+                "message":
+                    "Invalid Binance response."
+            }
+
+        symbols = data.get(
+            "symbols",
+            []
+        )
 
         return {
 
-            "count": len(data),
+            "ok": True,
 
-            "symbols": data
+            "test":
+                "exchangeInfo",
 
+            "api":
+                BINANCE_DATA_API,
+
+            "symbols_received":
+                len(symbols),
+
+            "message":
+                (
+                    "Binance public market "
+                    "data API is reachable."
+                ),
+
+            "time":
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
         }
 
     except Exception as e:
 
         logger.exception(
-            "Failed to load symbols"
+            "DIAGNOSTIC | test-binance FAILED"
+        )
+
+        return {
+
+            "ok": False,
+
+            "test":
+                "exchangeInfo",
+
+            "api":
+                BINANCE_DATA_API,
+
+            "error":
+                str(e),
+
+            "message":
+                (
+                    "Railway could not retrieve "
+                    "Binance exchangeInfo."
+                ),
+
+            "time":
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+        }
+
+
+# =========================================================
+# DIAGNOSTIC 2
+# Test Binance Klines
+# =========================================================
+
+@app.get("/api/test-klines")
+def test_klines(
+    symbol: str = Query(
+        "BTCUSDT"
+    )
+):
+
+    logger.info(
+        "DIAGNOSTIC | test-klines START | symbol=%s",
+        symbol
+    )
+
+    normalized = normalize_symbol(
+        symbol
+    )
+
+    raw_symbol = binance_symbol(
+        normalized
+    )
+
+    try:
+
+        data = binance_get(
+            "/api/v3/klines",
+            {
+                "symbol":
+                    raw_symbol,
+
+                "interval":
+                    TIMEFRAME,
+
+                "limit":
+                    10
+            }
+        )
+
+        if not isinstance(
+            data,
+            list
+        ):
+
+            return {
+
+                "ok": False,
+
+                "test":
+                    "klines",
+
+                "symbol":
+                    normalized,
+
+                "message":
+                    "Invalid klines response."
+            }
+
+        if len(data) == 0:
+
+            return {
+
+                "ok": False,
+
+                "test":
+                    "klines",
+
+                "symbol":
+                    normalized,
+
+                "message":
+                    "Binance returned zero candles."
+            }
+
+        last_candle = data[-1]
+
+        return {
+
+            "ok": True,
+
+            "test":
+                "klines",
+
+            "symbol":
+                normalized,
+
+            "binance_symbol":
+                raw_symbol,
+
+            "timeframe":
+                TIMEFRAME,
+
+            "candles_received":
+                len(data),
+
+            "last_open":
+                float(
+                    last_candle[1]
+                ),
+
+            "last_high":
+                float(
+                    last_candle[2]
+                ),
+
+            "last_low":
+                float(
+                    last_candle[3]
+                ),
+
+            "last_close":
+                float(
+                    last_candle[4]
+                ),
+
+            "message":
+                (
+                    "Binance klines endpoint "
+                    "is working."
+                ),
+
+            "time":
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+        }
+
+    except Exception as e:
+
+        logger.exception(
+            "DIAGNOSTIC | test-klines FAILED"
+        )
+
+        return {
+
+            "ok": False,
+
+            "test":
+                "klines",
+
+            "symbol":
+                normalized,
+
+            "binance_symbol":
+                raw_symbol,
+
+            "error":
+                str(e),
+
+            "message":
+                (
+                    "Could not retrieve Binance "
+                    "candles."
+                ),
+
+            "time":
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+        }
+
+
+# =========================================================
+# SYMBOLS
+# =========================================================
+
+@app.get("/api/symbols")
+def symbols():
+
+    logger.info(
+        "SYMBOLS ENDPOINT START"
+    )
+
+    try:
+
+        data = (
+            get_spot_usdt_symbols()
+        )
+
+        logger.info(
+            "SYMBOLS ENDPOINT COMPLETE | count=%s",
+            len(data)
+        )
+
+        return {
+
+            "count":
+                len(data),
+
+            "symbols":
+                data
+        }
+
+    except Exception as e:
+
+        logger.exception(
+            "SYMBOLS ENDPOINT FAILED"
         )
 
         raise HTTPException(
@@ -956,17 +1765,33 @@ def symbols():
         )
 
 
+# =========================================================
+# SCAN
+# =========================================================
+
 @app.get("/api/scan")
 def scan(
     symbol: str = Query(
         ...,
-        description="Example: BTC/USDT"
+        description=(
+            "Example: BTC/USDT"
+        )
     )
 ):
+
+    logger.info(
+        "SCAN ENDPOINT START | symbol=%s",
+        symbol
+    )
 
     try:
 
         result = analyze_symbol(
+            symbol
+        )
+
+        logger.info(
+            "SCAN ENDPOINT COMPLETE | symbol=%s",
             symbol
         )
 
@@ -979,7 +1804,7 @@ def scan(
     except Exception as e:
 
         logger.exception(
-            "Scan failed for %s",
+            "SCAN ENDPOINT FAILED | symbol=%s",
             symbol
         )
 
@@ -987,6 +1812,99 @@ def scan(
             status_code=502,
             detail=str(e)
         )
+
+
+# =========================================================
+# Startup
+# =========================================================
+
+@app.on_event(
+    "startup"
+)
+async def startup_event():
+
+    logger.info(
+        "=================================================="
+    )
+
+    logger.info(
+        "Support Rebound Scanner %s STARTING",
+        APP_VERSION
+    )
+
+    logger.info(
+        "BINANCE API: %s",
+        BINANCE_DATA_API
+    )
+
+    logger.info(
+        "TIMEFRAME: %s",
+        TIMEFRAME
+    )
+
+    logger.info(
+        "CANDLE LIMIT: %s",
+        CANDLE_LIMIT
+    )
+
+    logger.info(
+        "DROP LOOKBACK: %s",
+        DROP_LOOKBACK
+    )
+
+    logger.info(
+        "MIN DROP: %.2f%%",
+        MIN_DROP_PERCENT
+    )
+
+    logger.info(
+        "SUPPORT LOOKBACK: %s",
+        SUPPORT_LOOKBACK
+    )
+
+    logger.info(
+        "SUPPORT TOLERANCE: %.2f%%",
+        SUPPORT_TOLERANCE_PERCENT
+    )
+
+    logger.info(
+        "VOLUME MULTIPLIER: %.2f",
+        VOLUME_MULTIPLIER
+    )
+
+    logger.info(
+        "WMA FAST: %s",
+        WMA_FAST
+    )
+
+    logger.info(
+        "WMA SLOW: %s",
+        WMA_SLOW
+    )
+
+    logger.info(
+        "SL: %.2f%%",
+        SL_PERCENT
+    )
+
+    logger.info(
+        "TP1: %.2f%%",
+        TP1_PERCENT
+    )
+
+    logger.info(
+        "TP2: %.2f%%",
+        TP2_PERCENT
+    )
+
+    logger.info(
+        "TP3: %.2f%%",
+        TP3_PERCENT
+    )
+
+    logger.info(
+        "=================================================="
+    )
 
 
 # =========================================================
@@ -1004,8 +1922,13 @@ if __name__ == "__main__":
         )
     )
 
+    logger.info(
+        "Starting Uvicorn on port %s",
+        port
+    )
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=port
-      )
+    )
