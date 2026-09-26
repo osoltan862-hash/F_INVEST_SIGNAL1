@@ -1,526 +1,565 @@
 import os
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
-import ccxt
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from urllib.request import Request, urlopen
+from urllib.parse import urlencode
+from urllib.error import HTTPError, URLError
+import json
 
 
-# ============================================================
-# SUPPORT REBOUND SCANNER - WEB VERSION
-# ============================================================
-#
-# الاستراتيجية:
-#
-# Drop
-#   ↓
-# Support / Low Area
-#   ↓
-# Early Bullish Rejection
-#   ↓
-# Volume Confirmation
-#   ↓
-# WMA 50 Turning Up
-#   ↓
-# EARLY SUPPORT REBOUND
-#
-# Binance Spot فقط
-# لا يوجد تنفيذ تلقائي للصفقات
-# ============================================================
+# =========================================================
+# Support Rebound Scanner V1.1
+# Binance Public Market Data API
+# =========================================================
 
-
-# ============================================================
-# Logging
-# ============================================================
+APP_VERSION = "V1.1"
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-logger = logging.getLogger("support_rebound_web")
+logger = logging.getLogger("support_rebound_scanner")
 
 
-# ============================================================
-# SETTINGS
-# ============================================================
+# =========================================================
+# Binance Market Data API
+# =========================================================
+
+BINANCE_DATA_API = os.getenv(
+    "BINANCE_DATA_API",
+    "https://data-api.binance.vision"
+)
+
+
+# =========================================================
+# Strategy Settings
+# =========================================================
 
 TIMEFRAME = os.getenv("TIMEFRAME", "5m")
+
 CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "150"))
 
-# -----------------------------
-# Drop Detection
-# -----------------------------
-
 DROP_LOOKBACK = int(os.getenv("DROP_LOOKBACK", "24"))
-MIN_DROP_PERCENT = float(
-    os.getenv("MIN_DROP_PERCENT", "3.0")
-)
+MIN_DROP_PERCENT = float(os.getenv("MIN_DROP_PERCENT", "3.0"))
 
-# -----------------------------
-# Support Detection
-# -----------------------------
-
-SUPPORT_LOOKBACK = int(
-    os.getenv("SUPPORT_LOOKBACK", "12")
-)
-
+SUPPORT_LOOKBACK = int(os.getenv("SUPPORT_LOOKBACK", "12"))
 SUPPORT_TOLERANCE_PERCENT = float(
     os.getenv("SUPPORT_TOLERANCE_PERCENT", "0.20")
 )
 
-# -----------------------------
-# Volume Confirmation
-# -----------------------------
-
-VOLUME_LOOKBACK = int(
-    os.getenv("VOLUME_LOOKBACK", "11")
-)
-
+VOLUME_LOOKBACK = int(os.getenv("VOLUME_LOOKBACK", "11"))
 VOLUME_MULTIPLIER = float(
     os.getenv("VOLUME_MULTIPLIER", "1.30")
 )
 
-# -----------------------------
-# WMA
-# -----------------------------
+WMA_FAST = int(os.getenv("WMA_FAST", "50"))
+WMA_SLOW = int(os.getenv("WMA_SLOW", "103"))
 
-WMA_FAST = int(
-    os.getenv("WMA_FAST", "50")
-)
-
-WMA_SLOW = int(
-    os.getenv("WMA_SLOW", "103")
-)
-
-# -----------------------------
-# Entry / SL / TP
-# -----------------------------
-#
-# حسب الإعداد الذي حددناه:
-#
-# SL  = 3%
-# TP1 = 1%
-# TP2 = 2%
-# TP3 = 3%
-#
-
-SL_PERCENT = float(
-    os.getenv("SL_PERCENT", "3.0")
-)
-
-TP1_PERCENT = float(
-    os.getenv("TP1_PERCENT", "1.0")
-)
-
-TP2_PERCENT = float(
-    os.getenv("TP2_PERCENT", "2.0")
-)
-
-TP3_PERCENT = float(
-    os.getenv("TP3_PERCENT", "3.0")
-)
-
-# -----------------------------
-# Candle Confirmation
-# -----------------------------
+SL_PERCENT = float(os.getenv("SL_PERCENT", "3.0"))
+TP1_PERCENT = float(os.getenv("TP1_PERCENT", "1.0"))
+TP2_PERCENT = float(os.getenv("TP2_PERCENT", "2.0"))
+TP3_PERCENT = float(os.getenv("TP3_PERCENT", "3.0"))
 
 MIN_BODY_RATIO = float(
     os.getenv("MIN_BODY_RATIO", "0.25")
 )
 
 
-# ============================================================
-# BINANCE CONNECTION
-# ============================================================
-
-exchange = ccxt.binance(
-    {
-        "apiKey": os.getenv(
-            "BINANCE_API_KEY",
-            ""
-        ),
-        "secret": os.getenv(
-            "BINANCE_SECRET_KEY",
-            ""
-        ),
-        "enableRateLimit": True,
-        "options": {
-            "defaultType": "spot",
-        },
-    }
-)
-
-
-# ============================================================
-# FASTAPI
-# ============================================================
+# =========================================================
+# FastAPI
+# =========================================================
 
 app = FastAPI(
     title="Support Rebound Scanner",
-    version="1.0.0",
-    description="Manual Binance Spot Support Rebound Scanner",
+    version=APP_VERSION
 )
 
 
-# ============================================================
-# STATIC FILES
-# ============================================================
+# =========================================================
+# Static Files
+# =========================================================
 
 STATIC_DIR = os.path.join(
     os.path.dirname(__file__),
-    "static",
+    "static"
 )
 
-app.mount(
-    "/static",
-    StaticFiles(directory=STATIC_DIR),
-    name="static",
-)
-
-
-# ============================================================
-# SYMBOL NORMALIZATION
-# ============================================================
-
-def normalize_symbol(symbol: str) -> str:
-    """
-    يقبل:
-
-    BTC/USDT
-    BTCUSDT
-    BTC-USDT
-
-    ويحولها إلى:
-
-    BTC/USDT
-    """
-
-    value = (
-        symbol
-        .strip()
-        .upper()
-        .replace(" ", "")
+if os.path.isdir(STATIC_DIR):
+    app.mount(
+        "/static",
+        StaticFiles(directory=STATIC_DIR),
+        name="static"
     )
 
-    if value.endswith("-USDT"):
-        value = (
-            value[:-5]
-            + "/USDT"
+
+# =========================================================
+# Binance HTTP Helper
+# =========================================================
+
+def binance_get(path: str, params: Optional[dict] = None):
+
+    url = BINANCE_DATA_API.rstrip("/") + path
+
+    if params:
+        url += "?" + urlencode(params)
+
+    logger.info("Binance request: %s", url)
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Support-Rebound-Scanner/1.1"
+        },
+        method="GET"
+    )
+
+    try:
+
+        with urlopen(request, timeout=20) as response:
+
+            raw = response.read().decode("utf-8")
+
+            return json.loads(raw)
+
+    except HTTPError as e:
+
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = ""
+
+        logger.error(
+            "Binance HTTP %s: %s",
+            e.code,
+            body
         )
 
-    elif (
-        value.endswith("USDT")
-        and "/" not in value
-    ):
-        value = (
-            value[:-4]
-            + "/USDT"
+        raise RuntimeError(
+            f"Binance API HTTP {e.code}: {body}"
         )
 
-    return value
+    except URLError as e:
+
+        logger.error(
+            "Binance connection error: %s",
+            e
+        )
+
+        raise RuntimeError(
+            f"Binance connection error: {e}"
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            "Unexpected Binance error"
+        )
+
+        raise RuntimeError(
+            f"Binance API error: {e}"
+        )
 
 
-# ============================================================
-# GET BINANCE SPOT USDT SYMBOLS
-# ============================================================
+# =========================================================
+# Symbol Helpers
+# =========================================================
+
+def normalize_symbol(symbol: str) -> str:
+
+    if not symbol:
+        return ""
+
+    symbol = symbol.strip().upper()
+
+    symbol = symbol.replace("-", "/")
+
+    if "/" not in symbol and symbol.endswith("USDT"):
+        symbol = symbol[:-4] + "/USDT"
+
+    if "/" not in symbol:
+        return symbol
+
+    base, quote = symbol.split("/", 1)
+
+    return f"{base}/{quote}"
+
+
+def binance_symbol(symbol: str) -> str:
+
+    normalized = normalize_symbol(symbol)
+
+    return normalized.replace("/", "")
+
+
+# =========================================================
+# Binance Spot Symbols
+# =========================================================
 
 def get_spot_usdt_symbols():
 
-    markets = exchange.load_markets()
+    data = binance_get(
+        "/api/v3/exchangeInfo"
+    )
 
     symbols = []
 
-    for symbol, market in markets.items():
+    for item in data.get("symbols", []):
 
-        if not market.get(
-            "active",
-            True
+        if (
+            item.get("status") == "TRADING"
+            and item.get("quoteAsset") == "USDT"
+            and item.get("isSpotTradingAllowed") is True
         ):
-            continue
 
-        if market.get(
-            "spot"
-        ) is not True:
-            continue
+            symbols.append(
+                item.get("symbol")
+            )
 
-        if market.get(
-            "quote"
-        ) != "USDT":
-            continue
-
-        symbols.append(symbol)
-
-    return sorted(symbols)
-
-
-# ============================================================
-# FETCH OHLCV
-# ============================================================
-
-def fetch_ohlcv(
-    symbol: str
-) -> pd.DataFrame:
-
-    rows = exchange.fetch_ohlcv(
-        symbol,
-        timeframe=TIMEFRAME,
-        limit=max(
-            CANDLE_LIMIT,
-            WMA_SLOW + 20,
-        ),
+    symbols = sorted(
+        set(symbols)
     )
 
-    if not rows:
-        raise ValueError(
-            "Binance returned no candle data."
+    logger.info(
+        "Loaded %s Binance Spot USDT symbols",
+        len(symbols)
+    )
+
+    return symbols
+
+
+# =========================================================
+# Fetch Candles
+# =========================================================
+
+def fetch_ohlcv(symbol: str) -> pd.DataFrame:
+
+    raw_symbol = binance_symbol(symbol)
+
+    data = binance_get(
+        "/api/v3/klines",
+        {
+            "symbol": raw_symbol,
+            "interval": TIMEFRAME,
+            "limit": CANDLE_LIMIT
+        }
+    )
+
+    if not data:
+
+        raise RuntimeError(
+            f"No candle data returned for {raw_symbol}"
         )
 
-    df = pd.DataFrame(
-        rows,
-        columns=[
-            "timestamp",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-        ],
-    )
-
-    df["datetime"] = pd.to_datetime(
-        df["timestamp"],
-        unit="ms",
-        utc=True,
-    )
-
-    for column in [
+    columns = [
+        "open_time",
         "open",
         "high",
         "low",
         "close",
         "volume",
-    ]:
+        "close_time",
+        "quote_volume",
+        "trades",
+        "taker_buy_base",
+        "taker_buy_quote",
+        "ignore"
+    ]
+
+    df = pd.DataFrame(
+        data,
+        columns=columns
+    )
+
+    numeric_columns = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_volume"
+    ]
+
+    for column in numeric_columns:
 
         df[column] = pd.to_numeric(
             df[column],
-            errors="coerce",
+            errors="coerce"
         )
 
-    df = (
-        df
-        .dropna()
-        .reset_index(drop=True)
+    df["open_time"] = pd.to_numeric(
+        df["open_time"],
+        errors="coerce"
     )
 
-    # --------------------------------------------------------
-    # تجاهل الشمعة الحالية التي لم تغلق بعد
-    # --------------------------------------------------------
+    df["close_time"] = pd.to_numeric(
+        df["close_time"],
+        errors="coerce"
+    )
 
-    if len(df) > 2:
+    df = df.dropna(
+        subset=[
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume"
+        ]
+    ).reset_index(drop=True)
+
+    # =====================================================
+    # Remove current still-forming candle
+    # =====================================================
+
+    if len(df) > 1:
 
         df = df.iloc[:-1].copy()
 
-    return df
+    return df.reset_index(drop=True)
 
 
-# ============================================================
+# =========================================================
 # WMA
-# ============================================================
+# =========================================================
 
-def wma(
+def calculate_wma(
     series: pd.Series,
     period: int
 ) -> pd.Series:
 
-    weights = list(
-        range(
-            1,
-            period + 1
-        )
+    weights = pd.Series(
+        range(1, period + 1),
+        dtype=float
     )
-
-    total = sum(weights)
 
     return series.rolling(
         period
     ).apply(
-        lambda values:
-        sum(
-            value * weight
-            for value, weight
-            in zip(
-                values,
-                weights
-            )
-        ) / total,
-        raw=True,
+        lambda values: (
+            values * weights.values
+        ).sum() / weights.sum(),
+        raw=True
     )
 
 
-# ============================================================
-# CALCULATE ENTRY / SL / TP
-# ============================================================
+# =========================================================
+# Price Levels
+# =========================================================
 
-def calculate_levels(
-    entry: float
-):
+def calculate_levels(entry: float):
+
+    sl = entry * (
+        1.0 - SL_PERCENT / 100.0
+    )
+
+    tp1 = entry * (
+        1.0 + TP1_PERCENT / 100.0
+    )
+
+    tp2 = entry * (
+        1.0 + TP2_PERCENT / 100.0
+    )
+
+    tp3 = entry * (
+        1.0 + TP3_PERCENT / 100.0
+    )
 
     return {
-
-        "entry": entry,
-
-        "sl":
-            entry
-            * (
-                1
-                - SL_PERCENT / 100
-            ),
-
-        "tp1":
-            entry
-            * (
-                1
-                + TP1_PERCENT / 100
-            ),
-
-        "tp2":
-            entry
-            * (
-                1
-                + TP2_PERCENT / 100
-            ),
-
-        "tp3":
-            entry
-            * (
-                1
-                + TP3_PERCENT / 100
-            ),
+        "entry": float(entry),
+        "sl": float(sl),
+        "tp1": float(tp1),
+        "tp2": float(tp2),
+        "tp3": float(tp3)
     }
 
 
-# ============================================================
-# ANALYZE SYMBOL
-# ============================================================
+# =========================================================
+# Candle Rejection
+# =========================================================
 
-def analyze_symbol(
-    symbol: str
-):
+def rejection_candle(row):
 
-    # ========================================================
-    # STRATEGY
-    # ========================================================
-    #
-    # 1. Recent Drop
-    # 2. Support / Low Area
-    # 3. Support Touch
-    # 4. Bullish Rejection
-    # 5. Volume Confirmation
-    # 6. WMA 50 Turning Up
-    #
-    # ========================================================
-
-    df = fetch_ohlcv(symbol)
-
-    minimum_needed = max(
-        DROP_LOOKBACK + 3,
-        SUPPORT_LOOKBACK + 3,
-        VOLUME_LOOKBACK + 3,
-        WMA_SLOW + 3,
-        30,
+    candle_range = float(
+        row["high"] - row["low"]
     )
 
-    if len(df) < minimum_needed:
+    if candle_range <= 0:
+        return {
+            "bullish": False,
+            "body_ratio": 0.0,
+            "close_upper_half": False,
+            "lower_wick_ratio": 0.0
+        }
 
-        raise ValueError(
-            f"Not enough closed candles. "
-            f"Need {minimum_needed}, "
-            f"received {len(df)}."
+    body = abs(
+        float(row["close"]) -
+        float(row["open"])
+    )
+
+    body_ratio = body / candle_range
+
+    lower_wick = (
+        min(
+            float(row["open"]),
+            float(row["close"])
+        )
+        - float(row["low"])
+    )
+
+    lower_wick_ratio = (
+        lower_wick / candle_range
+    )
+
+    close_position = (
+        float(row["close"]) -
+        float(row["low"])
+    ) / candle_range
+
+    return {
+        "bullish": (
+            float(row["close"]) >
+            float(row["open"])
+        ),
+
+        "body_ratio": float(
+            body_ratio
+        ),
+
+        "close_upper_half": (
+            close_position >= 0.50
+        ),
+
+        "lower_wick_ratio": float(
+            lower_wick_ratio
+        )
+    }
+
+
+# =========================================================
+# Main Analysis
+# =========================================================
+
+def analyze_symbol(symbol: str):
+
+    normalized = normalize_symbol(symbol)
+
+    if not normalized.endswith("/USDT"):
+
+        raise HTTPException(
+            status_code=400,
+            detail="Only Binance Spot USDT symbols are supported."
         )
 
-    # ========================================================
+    df = fetch_ohlcv(normalized)
+
+    minimum_required = max(
+        WMA_SLOW + 5,
+        DROP_LOOKBACK + 5,
+        SUPPORT_LOOKBACK + 5,
+        VOLUME_LOOKBACK + 5,
+        110
+    )
+
+    if len(df) < minimum_required:
+
+        return {
+            "symbol": normalized,
+            "signal": "NOT ENOUGH DATA",
+            "message": (
+                f"Need at least {minimum_required} "
+                f"closed candles."
+            )
+        }
+
+    # =====================================================
     # WMA
-    # ========================================================
+    # =====================================================
 
-    df["wma_fast"] = wma(
+    df["wma_fast"] = calculate_wma(
         df["close"],
-        WMA_FAST,
+        WMA_FAST
     )
 
-    df["wma_slow"] = wma(
+    df["wma_slow"] = calculate_wma(
         df["close"],
-        WMA_SLOW,
+        WMA_SLOW
     )
 
-    # آخر شمعة مغلقة
-    i = len(df) - 1
+    current = df.iloc[-1]
+    previous = df.iloc[-2]
 
-    current = df.iloc[i]
+    entry = float(
+        current["close"]
+    )
 
-    previous = df.iloc[i - 1]
+    wma_fast = float(
+        current["wma_fast"]
+    )
 
-    # ========================================================
-    # 1. DROP
-    # ========================================================
+    wma_slow = float(
+        current["wma_slow"]
+    )
+
+    previous_wma_fast = float(
+        previous["wma_fast"]
+    )
+
+    # =====================================================
+    # Recent High / Drop
+    # =====================================================
 
     drop_start = max(
         0,
-        i - DROP_LOOKBACK,
+        len(df) - DROP_LOOKBACK - 1
     )
 
-    prior_window = df.iloc[
-        drop_start:i
+    drop_end = len(df) - 1
+
+    previous_window = df.iloc[
+        drop_start:drop_end
     ]
 
-    prior_high = float(
-        prior_window["high"].max()
+    recent_high = float(
+        previous_window["high"].max()
     )
-
-    if prior_high <= 0:
-
-        raise ValueError(
-            "Invalid prior high."
-        )
 
     drop_percent = (
-        (
-            prior_high
-            - float(current["close"])
-        )
-        / prior_high
-    ) * 100
-
-    drop_confirmed = (
-        drop_percent
-        >= MIN_DROP_PERCENT
+        (recent_high - entry)
+        / recent_high
+        * 100.0
     )
 
-    # ========================================================
-    # 2. SUPPORT
-    # ========================================================
-
-    support_start = max(
-        0,
-        i - SUPPORT_LOOKBACK,
+    drop_condition = (
+        drop_percent >= MIN_DROP_PERCENT
     )
+
+    # =====================================================
+    # Support
+    # =====================================================
 
     support_window = df.iloc[
-        support_start:i + 1
+        -SUPPORT_LOOKBACK:
     ]
 
     support = float(
         support_window["low"].min()
     )
 
-    tolerance = (
-        support
-        * SUPPORT_TOLERANCE_PERCENT
-        / 100
+    support_distance_percent = (
+        abs(entry - support)
+        / support
+        * 100.0
     )
+
+    # =====================================================
+    # Support Touch
+    # =====================================================
 
     current_low = float(
         current["low"]
@@ -530,118 +569,64 @@ def analyze_symbol(
         previous["low"]
     )
 
-    current_touches_support = (
-        current_low
-        <= support + tolerance
+    current_support_distance = (
+        abs(current_low - support)
+        / support
+        * 100.0
     )
 
-    previous_touches_support = (
-        previous_low
-        <= support + tolerance
+    previous_support_distance = (
+        abs(previous_low - support)
+        / support
+        * 100.0
     )
 
-    support_confirmed = (
-        current_touches_support
-        or previous_touches_support
+    support_touched = (
+        current_support_distance
+        <= SUPPORT_TOLERANCE_PERCENT
+        or
+        previous_support_distance
+        <= SUPPORT_TOLERANCE_PERCENT
     )
 
-    # ========================================================
-    # 3. BULLISH REJECTION
-    # ========================================================
+    # =====================================================
+    # Rejection Candle
+    # =====================================================
 
-    candle_open = float(
-        current["open"]
-    )
-
-    candle_high = float(
-        current["high"]
-    )
-
-    candle_low = float(
-        current["low"]
-    )
-
-    candle_close = float(
-        current["close"]
-    )
-
-    candle_range = (
-        candle_high
-        - candle_low
-    )
-
-    if candle_range > 0:
-
-        body_ratio = (
-            abs(
-                candle_close
-                - candle_open
-            )
-            / candle_range
-        )
-
-        close_position = (
-            candle_close
-            - candle_low
-        ) / candle_range
-
-        lower_wick = (
-            min(
-                candle_open,
-                candle_close
-            )
-            - candle_low
-        )
-
-        lower_wick_ratio = (
-            lower_wick
-            / candle_range
-        )
-
-    else:
-
-        body_ratio = 0
-
-        close_position = 0
-
-        lower_wick_ratio = 0
-
-    bullish = (
-        candle_close
-        > candle_open
+    candle = rejection_candle(
+        current
     )
 
     bullish_rejection = (
-        bullish
-        and body_ratio
+        candle["bullish"]
+        and
+        candle["body_ratio"]
         >= MIN_BODY_RATIO
-        and close_position
-        >= 0.50
-        and lower_wick_ratio
+        and
+        candle["close_upper_half"]
+        and
+        candle["lower_wick_ratio"]
         >= 0.15
     )
 
-    # ========================================================
-    # 4. VOLUME
-    # ========================================================
+    # =====================================================
+    # Volume Confirmation
+    # =====================================================
 
-    volume_start = max(
-        0,
-        i - VOLUME_LOOKBACK,
+    volume_start = (
+        len(df)
+        - VOLUME_LOOKBACK
+        - 1
     )
 
-    previous_volumes = (
-        df.iloc[
-            volume_start:i
-        ]["volume"]
-    )
+    volume_end = len(df) - 1
 
-    average_volume = (
-        float(
-            previous_volumes.mean()
-        )
-        if len(previous_volumes)
-        else 0
+    previous_volumes = df.iloc[
+        volume_start:volume_end
+    ]["volume"]
+
+    average_volume = float(
+        previous_volumes.mean()
     )
 
     current_volume = float(
@@ -657,414 +642,356 @@ def analyze_symbol(
 
     else:
 
-        volume_ratio = 0
+        volume_ratio = 0.0
 
-    volume_confirmed = (
-        volume_ratio
-        >= VOLUME_MULTIPLIER
+    volume_condition = (
+        volume_ratio >= VOLUME_MULTIPLIER
     )
 
-    # ========================================================
-    # 5. WMA TREND
-    # ========================================================
-
-    if pd.notna(
-        current["wma_fast"]
-    ):
-
-        current_wma_fast = float(
-            current["wma_fast"]
-        )
-
-    else:
-
-        current_wma_fast = None
-
-    if pd.notna(
-        previous["wma_fast"]
-    ):
-
-        previous_wma_fast = float(
-            previous["wma_fast"]
-        )
-
-    else:
-
-        previous_wma_fast = None
-
-    if pd.notna(
-        current["wma_slow"]
-    ):
-
-        current_wma_slow = float(
-            current["wma_slow"]
-        )
-
-    else:
-
-        current_wma_slow = None
+    # =====================================================
+    # WMA Turning Up
+    # =====================================================
 
     wma_turning_up = (
-        current_wma_fast
-        is not None
-        and previous_wma_fast
-        is not None
-        and current_wma_fast
-        > previous_wma_fast
+        wma_fast >
+        previous_wma_fast
     )
 
-    # ========================================================
-    # FINAL CONDITIONS
-    # ========================================================
+    # =====================================================
+    # Final Signal
+    # =====================================================
 
     conditions = {
 
-        "drop":
-            drop_confirmed,
+        "drop": bool(
+            drop_condition
+        ),
 
-        "support":
-            support_confirmed,
+        "support_touch": bool(
+            support_touched
+        ),
 
-        "bullish_rejection":
-            bullish_rejection,
+        "bullish_rejection": bool(
+            bullish_rejection
+        ),
 
-        "volume":
-            volume_confirmed,
+        "volume_confirmation": bool(
+            volume_condition
+        ),
 
-        "wma_turning_up":
-            wma_turning_up,
+        "wma50_turning_up": bool(
+            wma_turning_up
+        )
     }
 
     confirmed = all(
         conditions.values()
     )
 
-    # ========================================================
-    # SIGNAL
-    # ========================================================
-
     if confirmed:
 
-        signal = (
-            "EARLY SUPPORT REBOUND"
+        signal = "EARLY SUPPORT REBOUND"
+
+        message = (
+            "All support-rebound conditions "
+            "are confirmed."
         )
 
     else:
 
-        signal = (
-            "NO CONFIRMED SIGNAL"
+        signal = "NO CONFIRMED SIGNAL"
+
+        failed = [
+            name
+            for name, value
+            in conditions.items()
+            if not value
+        ]
+
+        message = (
+            "Waiting for: "
+            + ", ".join(failed)
         )
 
-    # ========================================================
-    # LEVELS
-    # ========================================================
-
-    entry = candle_close
+    # =====================================================
+    # Levels
+    # =====================================================
 
     levels = calculate_levels(
         entry
     )
 
-    # ========================================================
-    # SUPPORT DISTANCE
-    # ========================================================
-
-    if support:
-
-        support_distance_percent = (
-            (
-                entry
-                - support
-            )
-            / support
-        ) * 100
-
-    else:
-
-        support_distance_percent = 0
-
-    # ========================================================
-    # RETURN
-    # ========================================================
+    # =====================================================
+    # Result
+    # =====================================================
 
     return {
 
-        "symbol":
-            symbol,
+        "symbol": normalized,
 
-        "timeframe":
-            TIMEFRAME,
+        "signal": signal,
 
-        "signal":
-            signal,
+        "message": message,
 
-        "confirmed":
-            confirmed,
+        "timeframe": TIMEFRAME,
 
-        "checked_at":
-            datetime.now(
-                timezone.utc
-            ).isoformat(),
+        "market": "Binance Spot",
 
-        "candle_time":
-            current[
-                "datetime"
-            ].isoformat(),
+        "price": round(
+            entry,
+            12
+        ),
 
-        "price":
-            candle_close,
-
-        "entry":
+        "entry": round(
             levels["entry"],
+            12
+        ),
 
-        "sl":
-            levels["sl"],
-
-        "tp1":
-            levels["tp1"],
-
-        "tp2":
-            levels["tp2"],
-
-        "tp3":
-            levels["tp3"],
-
-        "drop_percent":
+        "drop_percent": round(
             drop_percent,
+            3
+        ),
 
-        "prior_high":
-            prior_high,
+        "recent_high": round(
+            recent_high,
+            12
+        ),
 
-        "support":
+        "support": round(
             support,
+            12
+        ),
 
-        "support_distance_percent":
+        "support_distance_percent": round(
             support_distance_percent,
+            3
+        ),
 
-        "volume_ratio":
+        "volume_ratio": round(
             volume_ratio,
+            3
+        ),
 
-        "average_volume":
+        "average_volume": round(
             average_volume,
+            8
+        ),
 
-        "current_volume":
+        "current_volume": round(
             current_volume,
+            8
+        ),
 
-        "wma50":
-            current_wma_fast,
+        "wma50": round(
+            wma_fast,
+            12
+        ),
 
-        "wma103":
-            current_wma_slow,
+        "wma103": round(
+            wma_slow,
+            12
+        ),
 
-        "body_ratio":
-            body_ratio,
+        "previous_wma50": round(
+            previous_wma_fast,
+            12
+        ),
 
-        "close_position":
-            close_position,
+        "candle_body_ratio": round(
+            candle["body_ratio"],
+            3
+        ),
 
-        "lower_wick_ratio":
-            lower_wick_ratio,
+        "lower_wick_ratio": round(
+            candle["lower_wick_ratio"],
+            3
+        ),
 
-        "conditions_met":
-            sum(
-                conditions.values()
+        "conditions": conditions,
+
+        "levels": {
+
+            "entry": round(
+                levels["entry"],
+                12
             ),
 
-        "conditions_total":
-            len(conditions),
+            "sl": round(
+                levels["sl"],
+                12
+            ),
 
-        "conditions":
-            conditions,
+            "tp1": round(
+                levels["tp1"],
+                12
+            ),
+
+            "tp2": round(
+                levels["tp2"],
+                12
+            ),
+
+            "tp3": round(
+                levels["tp3"],
+                12
+            )
+        },
+
+        "strategy": {
+
+            "drop_lookback": DROP_LOOKBACK,
+
+            "min_drop_percent":
+                MIN_DROP_PERCENT,
+
+            "support_lookback":
+                SUPPORT_LOOKBACK,
+
+            "support_tolerance_percent":
+                SUPPORT_TOLERANCE_PERCENT,
+
+            "volume_lookback":
+                VOLUME_LOOKBACK,
+
+            "volume_multiplier":
+                VOLUME_MULTIPLIER,
+
+            "wma_fast":
+                WMA_FAST,
+
+            "wma_slow":
+                WMA_SLOW,
+
+            "sl_percent":
+                SL_PERCENT,
+
+            "tp1_percent":
+                TP1_PERCENT,
+
+            "tp2_percent":
+                TP2_PERCENT,
+
+            "tp3_percent":
+                TP3_PERCENT
+        },
+
+        "updated_at":
+            datetime.now(
+                timezone.utc
+            ).isoformat()
     }
 
 
-# ============================================================
-# HOME PAGE
-# ============================================================
+# =========================================================
+# Routes
+# =========================================================
 
 @app.get("/")
 def home():
 
-    return FileResponse(
-        os.path.join(
-            STATIC_DIR,
-            "index.html"
-        )
+    index_file = os.path.join(
+        STATIC_DIR,
+        "index.html"
     )
 
+    if not os.path.isfile(index_file):
 
-# ============================================================
-# HEALTH CHECK
-# ============================================================
+        raise HTTPException(
+            status_code=404,
+            detail="static/index.html not found."
+        )
+
+    return FileResponse(
+        index_file
+    )
+
 
 @app.get("/api/health")
 def health():
 
     return {
 
-        "status":
-            "ok",
+        "status": "ok",
 
-        "service":
-            "Support Rebound Scanner",
+        "version": APP_VERSION,
+
+        "binance_api":
+            BINANCE_DATA_API,
 
         "timeframe":
             TIMEFRAME,
 
-        "spot_only":
-            True,
+        "market":
+            "Binance Spot",
 
-        "auto_trading":
-            False,
+        "strategy":
+            "Drop → Support → Rejection → Volume → WMA50 Up"
     }
 
-
-# ============================================================
-# BINANCE SYMBOLS
-# ============================================================
 
 @app.get("/api/symbols")
 def symbols():
 
     try:
 
-        result = (
-            get_spot_usdt_symbols()
-        )
+        data = get_spot_usdt_symbols()
 
         return {
 
-            "count":
-                len(result),
+            "count": len(data),
 
-            "symbols":
-                result,
+            "symbols": data
+
         }
 
-    except Exception as exc:
+    except Exception as e:
 
         logger.exception(
-            "Failed to load Binance symbols"
+            "Failed to load symbols"
         )
 
         raise HTTPException(
             status_code=502,
-            detail=(
-                "Could not load "
-                "Binance Spot symbols: "
-                f"{exc}"
-            ),
+            detail=str(e)
         )
 
-
-# ============================================================
-# SCAN SELECTED SYMBOL
-# ============================================================
 
 @app.get("/api/scan")
 def scan(
     symbol: str = Query(
         ...,
-        min_length=3,
-        max_length=30,
+        description="Example: BTC/USDT"
     )
 ):
 
     try:
 
-        normalized = (
-            normalize_symbol(
-                symbol
-            )
+        result = analyze_symbol(
+            symbol
         )
 
-        markets = (
-            exchange.load_markets()
-        )
-
-        market = markets.get(
-            normalized
-        )
-
-        if not market:
-
-            raise HTTPException(
-                status_code=404,
-                detail=(
-                    f"{normalized} "
-                    "was not found "
-                    "on Binance."
-                ),
-            )
-
-        if (
-            market.get("spot")
-            is not True
-            or market.get("quote")
-            != "USDT"
-        ):
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Please select a "
-                    "Binance Spot "
-                    "USDT symbol."
-                ),
-            )
-
-        if (
-            market.get(
-                "active",
-                True
-            )
-            is False
-        ):
-
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"{normalized} "
-                    "is not currently active."
-                ),
-            )
-
-        return analyze_symbol(
-            normalized
-        )
+        return result
 
     except HTTPException:
 
         raise
 
-    except ccxt.BaseError as exc:
+    except Exception as e:
 
         logger.exception(
-            "Binance error while scanning"
+            "Scan failed for %s",
+            symbol
         )
 
         raise HTTPException(
             status_code=502,
-            detail=(
-                f"Binance data error: {exc}"
-            ),
-        )
-
-    except Exception as exc:
-
-        logger.exception(
-            "Unexpected scan error"
-        )
-
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
+            detail=str(e)
         )
 
 
-# ============================================================
-# LOCAL / RAILWAY START
-# ============================================================
+# =========================================================
+# Local / Railway Start
+# =========================================================
 
 if __name__ == "__main__":
 
@@ -1073,12 +1000,12 @@ if __name__ == "__main__":
     port = int(
         os.getenv(
             "PORT",
-            "8000"
+            "8080"
         )
     )
 
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=port,
-)
+        port=port
+    )
