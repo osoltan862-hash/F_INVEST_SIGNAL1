@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>
+        Support Rebound Scanner
+    </title>
+
+    <style>
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+
+            margin: 0;
+
+            font-family:
+                Arial,
+                Tahoma,
+                sans-serif;
+
+            background: #0d1117;
+
+            color: #f0f3f6;
+        }
+
+
+        .container {
+
+            width: min(
+                100%,
+                720px
+            );
+
+            margin: 0 auto;
+
+            padding: 18px;
+        }
+
+
+        .header {
+
+            text-align: center;
+
+            margin-bottom: 18px;
+        }
+
+
+        .header h1 {
+
+            margin: 8px 0;
+
+            font-size: 25px;
+        }
+
+
+        .header p {
+
+            margin: 0;
+
+            color: #9da7b3;
+
+            font-size: 14px;
+        }
+
+
+        .card {
+
+            background: #151b23;
+
+            border: 1px solid #28313d;
+
+            border-radius: 16px;
+
+            padding: 16px;
+
+            margin-bottom: 14px;
+        }
+
+
+        label {
+
+            display: block;
+
+            margin-bottom: 8px;
+
+            color: #b9c2cc;
+
+            font-size: 14px;
+        }
+
+
+        .row {
+
+            display: flex;
+
+            gap: 10px;
+        }
+
+
+        .row > * {
+
+            flex: 1;
+        }
+
+
+        input,
+        select,
+        button {
+
+            width: 100%;
+
+            border-radius: 11px;
+
+            border: 1px solid #394452;
+
+            padding: 13px;
+
+            font-size: 16px;
+        }
+
+
+        input,
+        select {
+
+            background: #0f141b;
+
+            color: #ffffff;
+        }
+
+
+        button {
+
+            margin-top: 12px;
+
+            background: #1f9d61;
+
+            color: white;
+
+            border: none;
+
+            font-weight: bold;
+
+            cursor: pointer;
+        }
+
+
+        button:disabled {
+
+            opacity: 0.55;
+
+            cursor: wait;
+        }
+
+
+        .secondary {
+
+            background: #273140;
+        }
+
+
+        .status {
+
+            padding: 11px;
+
+            border-radius: 10px;
+
+            background: #10161e;
+
+            color: #aeb8c4;
+
+            font-size: 14px;
+
+            margin-top: 10px;
+        }
+
+
+        .signal {
+
+            text-align: center;
+
+            font-size: 21px;
+
+            font-weight: bold;
+
+            padding: 14px;
+
+            border-radius: 12px;
+
+            margin-bottom: 14px;
+        }
+
+
+        .good {
+
+            background: #123d2b;
+
+            color: #57e39b;
+
+            border: 1px solid #1e7650;
+        }
+
+
+        .neutral {
+
+            background: #352f16;
+
+            color: #e5cc68;
+
+            border: 1px solid #716329;
+        }
+
+
+        .symbol-title {
+
+            font-size: 22px;
+
+            font-weight: bold;
+        }
+
+
+        .muted {
+
+            color: #8994a2;
+
+            font-size: 13px;
+        }
+
+
+        .grid {
+
+            display: grid;
+
+            grid-template-columns:
+                repeat(2, 1fr);
+
+            gap: 10px;
+        }
+
+
+        .metric {
+
+            background: #10161e;
+
+            border-radius: 11px;
+
+            padding: 12px;
+
+            border: 1px solid #232c38;
+        }
+
+
+        .metric .name {
+
+            color: #8f9aa8;
+
+            font-size: 12px;
+
+            margin-bottom: 5px;
+        }
+
+
+        .metric .value {
+
+            font-size: 16px;
+
+            font-weight: bold;
+
+            direction: ltr;
+
+            text-align: left;
+        }
+
+
+        .levels {
+
+            display: grid;
+
+            grid-template-columns:
+                repeat(2, 1fr);
+
+            gap: 10px;
+        }
+
+
+        .level {
+
+            padding: 13px;
+
+            border-radius: 11px;
+
+            background: #10161e;
+
+            border: 1px solid #293341;
+        }
+
+
+        .level .name {
+
+            color: #9ba5b2;
+
+            font-size: 12px;
+        }
+
+
+        .level .value {
+
+            margin-top: 4px;
+
+            font-size: 17px;
+
+            font-weight: bold;
+
+            direction: ltr;
+
+            text-align: left;
+        }
+
+
+        .conditions {
+
+            display: grid;
+
+            grid-template-columns:
+                repeat(2, 1fr);
+
+            gap: 8px;
+        }
+
+
+        .condition {
+
+            padding: 10px;
+
+            border-radius: 9px;
+
+            background: #10161e;
+
+            border: 1px solid #293341;
+
+            font-size: 13px;
+        }
+
+
+        .condition.ok {
+
+            border-color: #1e7650;
+
+            color: #57e39b;
+        }
+
+
+        .condition.no {
+
+            color: #aeb8c4;
+        }
+
+
+        .error {
+
+            color: #ff7b72;
+
+            background: #3b1818;
+
+            border: 1px solid #713232;
+        }
+
+
+        .loading {
+
+            text-align: center;
+
+            color: #aeb8c4;
+
+            padding: 10px;
+        }
+
+
+        h3 {
+
+            margin-top: 22px;
+
+            margin-bottom: 12px;
+
+            font-size: 17px;
+        }
+
+
+        @media (
+            max-width: 520px
+        ) {
+
+            .row {
+
+                flex-direction: column;
+            }
+
+            .grid,
+            .levels,
+            .conditions {
+
+                grid-template-columns:
+                    1fr 1fr;
+            }
+        }
+
+    </style>
+
+</head>
+
+
+<body>
+
+<div class="container">
+
+
+    <!-- ==================================================
+         HEADER
+    =================================================== -->
+
+    <div class="header">
+
+        <h1>
+            📊 Support Rebound Scanner
+        </h1>
+
+        <p>
+            Binance Spot • فحص يدوي للعملة التي تختارها
+        </p>
+
+    </div>
+
+
+    <!-- ==================================================
+         SEARCH CARD
+    =================================================== -->
+
+    <div class="card">
+
+        <label for="symbol">
+
+            اختر العملة
+
+        </label>
+
+
+        <input
+            id="symbol"
+            list="symbolList"
+            value="BTC/USDT"
+            placeholder="BTC/USDT"
+            autocomplete="off"
+        >
+
+
+        <datalist
+            id="symbolList"
+        ></datalist>
+
+
+        <div class="row">
+
+
+            <div>
+
+                <label
+                    style="margin-top:12px;"
+                >
+
+                    الفريم
+
+                </label>
+
+
+                <select disabled>
+
+                    <option>
+                        5m
+                    </option>
+
+                </select>
+
+            </div>
+
+
+            <div>
+
+                <label
+                    style="margin-top:12px;"
+                >
+
+                    نوع السوق
+
+                </label>
+
+
+                <input
+                    value="Binance Spot"
+                    disabled
+                >
+
+            </div>
+
+
+        </div>
+
+
+        <button
+            id="scanBtn"
+            onclick="scanSymbol()"
+        >
+
+            🔍 فحص العملة الآن
+
+        </button>
+
+
+        <button
+            class="secondary"
+            onclick="loadSymbols()"
+        >
+
+            🔄 تحديث قائمة العملات
+
+        </button>
+
+
+        <div
+            id="status"
+            class="status"
+        >
+
+            جاهز للفحص.
+
+        </div>
+
+    </div>
+
+
+    <!-- ==================================================
+         RESULT
+    =================================================== -->
+
+    <div id="result"></div>
+
+
+</div>
+
+
+<script>
+
+
+// ======================================================
+// ELEMENTS
+// ======================================================
+
+const symbolInput =
+    document.getElementById(
+        "symbol"
+    );
+
+
+const symbolList =
+    document.getElementById(
+        "symbolList"
+    );
+
+
+const scanBtn =
+    document.getElementById(
+        "scanBtn"
+    );
+
+
+const statusBox =
+    document.getElementById(
+        "status"
+    );
+
+
+const resultBox =
+    document.getElementById(
+        "result"
+    );
+
+
+// ======================================================
+// FORMAT NUMBER
+// ======================================================
+
+function formatNumber(
+    value,
+    decimals = 6
+) {
+
+    if (
+        value === null ||
+        value === undefined ||
+        Number.isNaN(
+            Number(value)
+        )
+    ) {
+
+        return "-";
+    }
+
+
+    const number =
+        Number(value);
+
+
+    return number.toLocaleString(
+        "en-US",
+        {
+            maximumFractionDigits:
+                number >= 1000
+                    ? 2
+                    : decimals
+        }
+    );
+}
+
+
+// ======================================================
+// FORMAT PERCENT
+// ======================================================
+
+function formatPercent(
+    value
+) {
+
+    if (
+        value === null ||
+        value === undefined
+    ) {
+
+        return "-";
+    }
+
+
+    return (
+        Number(value)
+        .toFixed(2)
+        + "%"
+    );
+}
+
+
+// ======================================================
+// FORMAT RATIO
+// ======================================================
+
+function formatRatio(
+    value
+) {
+
+    if (
+        value === null ||
+        value === undefined
+    ) {
+
+        return "-";
+    }
+
+
+    return (
+        Number(value)
+        .toFixed(2)
+        + "x"
+    );
+}
+
+
+// ======================================================
+// CONDITION NAMES
+// ======================================================
+
+function conditionName(
+    key
+) {
+
+    const names = {
+
+        drop
